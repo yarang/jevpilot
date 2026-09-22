@@ -15,7 +15,8 @@
     "test:stop-line": "node --env-file=.env scripts/verify-stop-line.mjs",
     "test:experience": "node scripts/browser-experience.mjs",
     "deploy": "npm run build && wrangler deploy",
-    "dev:worker": "npm run build && wrangler dev"
+    "dev:worker": "npm run build && wrangler dev",
+    "validate:stage": "node scripts/validate-stage.mjs"
   },
   "dependencies": {
     "lucide": "^0.577.0",

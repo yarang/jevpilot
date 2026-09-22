@@ -1,0 +1,119 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import { generateWorld } from "../src/world.js";
+import { roadGeometry, roadOccupancy } from "../src/road-geometry.js";
+import {
+  convexity,
+  packSurface,
+  unpackSurface,
+  toManifest,
+  validateManifest,
+} from "../src/stage-format.js";
+
+const manifestFor = (seed, type) => {
+  const world = generateWorld(seed, type);
+  return toManifest(world, roadGeometry(world));
+};
+
+test("every procedural stage satisfies the manifest contract", () => {
+  for (const type of ["town", "city", "highway"])
+    for (const seed of [1, 7, 42]) {
+      const problems = validateManifest(manifestFor(seed, type));
+      assert.deepEqual(problems, [], `${type} seed ${seed}: ${problems[0]}`);
+    }
+});
+
+// roadOccupancy clips the car's footprint against each surface edge in turn.
+// That decomposition silently reports a car sitting inside a concave polygon as
+// fully off-road, so the guard has to be a build-time check, not a runtime one.
+test("concavity is caught by the validator, not by the occupancy test", () => {
+  const lShape = [
+    { x: 0, z: 0 },
+    { x: 10, z: 0 },
+    { x: 10, z: 10 },
+    { x: 6, z: 10 },
+    { x: 6, z: 4 },
+    { x: 0, z: 4 },
+  ];
+  assert(convexity(lShape) < 0);
+  assert(convexity(lShape.slice(0, 4)) >= 0);
+
+  // The car sits well inside the L, and occupancy still calls it off-road.
+  const car = { x: 2, z: 2, heading: 0, width: 2, depth: 3 };
+  const surface = {
+    points: lShape,
+    minX: 0,
+    maxX: 10,
+    minZ: 0,
+    maxZ: 10,
+  };
+  assert.equal(roadOccupancy(car, [surface]).on_road, false);
+
+  const manifest = manifestFor(42, "town");
+  manifest.surfaces.push(packSurface(lShape));
+  assert(
+    validateManifest(manifest).some((p) => p.includes("concave")),
+    "the validator has to reject what occupancy cannot",
+  );
+});
+
+test("the validator rejects each way a stage can be wrong", () => {
+  const cases = {
+    "neighbor ghost": (m) => m.nodes[0].neighbors.push("ghost"),
+    "asymmetric link": (m) => {
+      const first = m.nodes.find((n) => n.neighbors.length);
+      m.nodes.find((o) => o.id === first.neighbors[0]).neighbors = [];
+    },
+    "unknown control": (m) => (m.nodes[0].control = "roundabout"),
+    "zero width": (m) => (m.edges[0].width = 0),
+    "route gap": (m) => m.route.ids.splice(1, 0, "ghost"),
+    "short route": (m) => m.route.ids.pop(),
+    "version drift": (m) => (m.version = 99),
+    "self-intersecting surface": (m) =>
+      m.surfaces.push(
+        packSurface([
+          { x: 0, z: 0 },
+          { x: 10, z: 10 },
+          { x: 10, z: 0 },
+          { x: 0, z: 10 },
+        ]),
+      ),
+  };
+  for (const [label, mutate] of Object.entries(cases)) {
+    const manifest = structuredClone(manifestFor(42, "town"));
+    mutate(manifest);
+    assert(validateManifest(manifest).length > 0, `${label} went unreported`);
+  }
+});
+
+// Surfaces ride to the planner worker as centimetre integers so a manifest stays
+// small enough to import statically. A centimetre is far inside the tolerance
+// roadOccupancy works at, but the round trip still has to be lossless enough
+// that on-road stays on-road.
+test("centimetre packing preserves occupancy decisions", () => {
+  const world = generateWorld(42, "town");
+  const surfaces = roadGeometry(world);
+  for (const surface of surfaces) {
+    const back = unpackSurface(packSurface(surface.points));
+    assert.equal(back.length, surface.points.length);
+    for (const [i, p] of back.entries()) {
+      assert(Math.abs(p.x - surface.points[i].x) <= 0.005);
+      assert(Math.abs(p.z - surface.points[i].z) <= 0.005);
+    }
+  }
+  const car = { ...world.route.points[0], heading: 0, width: 1.9, depth: 4.75 };
+  const repacked = surfaces.map((s) => {
+    const points = unpackSurface(packSurface(s.points));
+    return {
+      points,
+      minX: Math.min(...points.map((p) => p.x)),
+      maxX: Math.max(...points.map((p) => p.x)),
+      minZ: Math.min(...points.map((p) => p.z)),
+      maxZ: Math.max(...points.map((p) => p.z)),
+    };
+  });
+  assert.equal(
+    roadOccupancy(car, repacked).on_road,
+    roadOccupancy(car, surfaces).on_road,
+  );
+});

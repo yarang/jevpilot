@@ -1,4 +1,13 @@
-import { angle, clamp, dist, heading, move, pointAt, round } from "./math.js";
+import {
+  angle,
+  clamp,
+  dist,
+  heading,
+  move,
+  nearestOnPath,
+  pointAt,
+  round,
+} from "./math.js";
 import {
   BRAKING,
   FULL_STOP_DISTANCE_M,
@@ -293,6 +302,23 @@ export function createObstaclePrediction(vehicle, obstacles) {
   };
 }
 
+// Between decisions the car carries no selected maneuver: at the start of a
+// drive, and after a reroute clears it. Holding the current wheel angle then
+// rolls the prediction straight through a bend and misses whatever waits past
+// it. Follow the lane instead while the car is actually tracking its route; a
+// car that has left the route keeps the steering-angle rollout, which is the
+// only honest guess there. nearbyPathBlocker defaults the same way.
+function predictedPath(vehicle) {
+  if (vehicle.maneuver) return vehicle.maneuver;
+  const points = vehicle.route?.points;
+  if (!points?.length) return null;
+  const near = nearestOnPath(vehicle, points);
+  const tracking =
+    near.distance <= 6 &&
+    Math.abs(angle((near.heading ?? vehicle.heading) - vehicle.heading)) < 1.2;
+  return tracking ? { lane_offset_m: 0, lookahead_m: 4.5 } : null;
+}
+
 // Predict crossing/merging conflicts, including motorcycles outside the forward lane strip.
 // The safeguard only limits speed; Jev remains responsible for steering.
 export function predictTrafficConflict(vehicle, obstacles) {
@@ -312,13 +338,14 @@ export function predictTrafficConflict(vehicle, obstacles) {
     vehicle,
     nearby.filter((o) => o.type === "car" || o.type === "motorcycle"),
   );
+  const path = predictedPath(vehicle);
   let traveled = 0,
     rearThreat = null;
   for (let time = 0; time <= horizon; time += step) {
     if (time > 0) {
-      const steering = vehicle.maneuver
-        ? maneuverSteering(ghost, vehicle.maneuver)
-        : vehicle.steering || 0;
+      // maneuverSteering falls back to the ghost's own angle without a route,
+      // so a car with nowhere to track keeps the previous behaviour.
+      const steering = maneuverSteering(ghost, path);
       const ahead = lead
         ? leadVehicle(ghost, [otherPose(lead.other, time - step)])
         : null;

@@ -12,6 +12,7 @@ import {
 } from "../src/driving-plan.js";
 import { generateWorld } from "../src/world.js";
 import { Simulation } from "../src/simulation.js";
+import { candidateChoices } from "../src/planning.js";
 import { heading, move, rng, samplePolyline } from "../src/math.js";
 
 function crossroads() {
@@ -86,8 +87,15 @@ test("random batches change while seeded runs remain reproducible", () => {
     Object.values(first.vectors).map((v) => v.steering),
     Object.values(next.vectors).map((v) => v.steering),
   );
+  // The sampled batch deliberately keeps off-road exploratory paths visible.
+  // Only the choices actually offered to Jev have to stay on asphalt.
   assert(
-    Object.values(first.vectors)
+    Object.values(first.vectors).some(
+      (v) => v.velocity_mps && !v.stays_on_road,
+    ),
+  );
+  assert(
+    Object.values(candidateChoices(first))
       .filter((v) => v.velocity_mps)
       .every((v) => v.stays_on_road),
   );

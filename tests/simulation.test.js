@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { generateWorld, shortestPath, signalState } from "../src/world.js";
 import { Simulation, physics } from "../src/simulation.js";
 import { blockedByBuilding, dist, pointAt, heading } from "../src/math.js";
+import { prepareJevRequest } from "../src/jev-request.js";
 
 test("100 seeds per world produce connected, distinct road graphs and valid start/destination routes", () => {
   for (const type of ["city", "town", "highway"])
@@ -16,9 +17,25 @@ test("100 seeds per world produce connected, distinct road graphs and valid star
         assert(w.byId[w.route.ids[i - 1]].neighbors.includes(w.route.ids[i]));
       assert.equal(w.route.ids.at(-1), w.destination);
       if (type === "highway") {
-        assert.equal(w.route.crossings.length, 0);
+        // The trip starts in Millbrook, so the route crosses its junctions
+        // before the ramp. The interstate mainline itself has no crossings.
+        assert(
+          w.route.crossings.every(
+            (c) => w.byId[c.nodeId].townJunction === true,
+          ),
+        );
         assert(w.route.length > 900);
-        assert(w.edges.every((e) => e.width === 25 && e.length >= 170));
+        // Interstate spans are wide and long. The Millbrook and Cedar Town
+        // streets that bracket them are ordinary 12 m local roads; the ramp
+        // and connector kinds in between carry their own widths.
+        const interstate = w.edges.filter((e) => e.kind === "interstate");
+        assert(interstate.length > 0);
+        assert(interstate.every((e) => e.width === 25 && e.length >= 170));
+        assert(
+          w.edges
+            .filter((e) => e.kind === "local")
+            .every((e) => e.width === 12),
+        );
       } else {
         assert(w.objects.some((o) => o.type === "stop_sign"));
         assert(w.objects.some((o) => o.type === "traffic_light"));
@@ -64,9 +81,10 @@ test("stop signs require a stationary dwell and give the first arrival priority"
   v.s = c.stopS - 3;
   v.speed = 0;
   assert.equal(s.rule(v, true).mustStop, true);
-  s.time += 1;
-  assert.equal(s.rule(v, true).mustStop, true);
+  // The player dwell is 0.6 s; a shorter pause does not serve the stop.
   s.time += 0.3;
+  assert.equal(s.rule(v, true).mustStop, true);
+  s.time += 0.4;
   assert.equal(s.rule(v, true).stopCompleted, true);
   s.locks.set(c.nodeId, { id: "another-car", at: s.time });
   assert.equal(s.rule(v).mustStop, true);
@@ -218,21 +236,42 @@ test("compact scene discovers only visible objects and refreshes when they move 
   sim.world.objects = [];
   sim.pedestrians = [];
   sim.traffic = [
-    { id: "test-car", type: "car", x: 0, z: 15, speed: 3, depth: 4 },
+    {
+      id: "test-car",
+      type: "car",
+      x: 0,
+      z: 200,
+      heading: 0,
+      speed: 3,
+      width: 1.9,
+      depth: 4,
+      stops: {},
+    },
   ];
   sim.scanScene();
-  assert(!sim.discovered.has("test-car"));
+  assert(!sim.discovered.has("test-car"), "beyond the 80 m sensor range");
   sim.traffic[0].z = -25;
   sim.scanScene();
   assert(sim.discovered.has("test-car"));
+  // Traffic is tracked through 360 degrees, so a car behind still registers;
+  // rear_pressure depends on it.
+  sim.traffic[0].z = 15;
+  sim.scanScene();
+  assert(sim.discovered.has("test-car"));
+  sim.traffic[0].z = -25;
+  sim.scanScene();
   assert.equal(sim.decisionState().scene.nearby[0].ahead_m, 25);
   sim.traffic[0].z = -20;
   sim.scanScene();
   assert.equal(sim.decisionState().scene.nearby[0].ahead_m, 20);
+  // The decision state keeps local detail for collision checks, rendering and
+  // the JSON inspector. What has to stay small is the request that is actually
+  // billed, which prepareJevRequest strips down before it leaves the server.
   const real = new Simulation(42, "city");
+  const sent = prepareJevRequest(real.decisionState()).request;
   assert(
-    JSON.stringify(real.decisionState()).length <
-      JSON.stringify(real.observation(true)).length * 0.1,
+    JSON.stringify(sent).length <
+      JSON.stringify(real.observation(true)).length * 0.03,
   );
 });
 
@@ -257,7 +296,7 @@ test("green signal releases a stopped car's speed constraint after the road clea
   }
   assert(red.speed_ceiling_mps < green.speed_ceiling_mps);
   assert.equal(green.scene.intersection.signal, "green");
-  assert.equal(green.scene.intersection.must_yield, false);
+  assert.equal(green.scene.intersection.already_entered, false);
   assert(green.speed_ceiling_mps >= 5);
 });
 

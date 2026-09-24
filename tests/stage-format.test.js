@@ -4,11 +4,13 @@ import { generateWorld } from "../src/world.js";
 import { roadGeometry, roadOccupancy } from "../src/road-geometry.js";
 import {
   convexity,
+  fromManifest,
   packSurface,
   unpackSurface,
   toManifest,
   validateManifest,
 } from "../src/stage-format.js";
+import { Simulation } from "../src/simulation.js";
 
 const manifestFor = (seed, type) => {
   const world = generateWorld(seed, type);
@@ -116,4 +118,68 @@ test("centimetre packing preserves occupancy decisions", () => {
     roadOccupancy(car, repacked).on_road,
     roadOccupancy(car, surfaces).on_road,
   );
+});
+
+// A manifest is the whole input an authored stage gets, so it has to be enough
+// to drive on. Packing to centimetres is lossy on purpose; what has to survive
+// is every decision, not every digit.
+test("a stage rebuilt from its manifest drives the same", () => {
+  for (const type of ["town", "city", "highway"]) {
+    const original = generateWorld(42, type);
+    const manifest = structuredClone(
+      toManifest(original, roadGeometry(original)),
+    );
+    assert.deepEqual(validateManifest(manifest), []);
+    const rebuilt = fromManifest(manifest);
+
+    // Stop lines and section boundaries decide where the car has to halt, so
+    // they round-trip exactly rather than within a tolerance.
+    assert.equal(
+      rebuilt.route.crossings.length,
+      (original.route.crossings ?? []).length,
+    );
+    for (const [i, c] of rebuilt.route.crossings.entries())
+      assert.equal(
+        c.stopS,
+        Math.round(original.route.crossings[i].stopS * 100) / 100,
+      );
+    for (const [i, s] of (rebuilt.route.sections ?? []).entries()) {
+      assert.equal(s.kind, original.route.sections[i].kind);
+      assert.equal(
+        s.startS,
+        Math.round(original.route.sections[i].startS * 100) / 100,
+      );
+    }
+
+    assert.equal(roadGeometry(rebuilt).length, roadGeometry(original).length);
+
+    const from = (world) => {
+      const sim = new Simulation(42, type);
+      sim.world = world;
+      sim.world.route = world.route;
+      sim.player.route = world.route;
+      return sim.decisionState();
+    };
+    const before = from(original),
+      after = from(rebuilt);
+
+    assert.deepEqual(Object.keys(after.vectors), Object.keys(before.vectors));
+    assert.equal(after.speed_ceiling_mps, before.speed_ceiling_mps);
+    for (const id of Object.keys(before.vectors)) {
+      const a = before.vectors[id],
+        b = after.vectors[id];
+      for (const key of [
+        "stays_on_road",
+        "stays_in_lane",
+        "collision_imminent",
+      ])
+        assert.equal(b[key], a[key], `${type} ${id}.${key}`);
+      assert(
+        Math.abs(b.steering - a.steering) < 0.005,
+        `${type} ${id}.steering`,
+      );
+      assert(Math.abs(b.route_error_m - a.route_error_m) < 0.05);
+      assert(Math.abs(b.lane_error_m - a.lane_error_m) < 0.05);
+    }
+  }
 });

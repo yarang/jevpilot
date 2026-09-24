@@ -57,6 +57,99 @@ export const SECTION_KINDS = [
   "town",
 ];
 
+// The driving line is authored, not derived. makeRoute builds it from the grid
+// for the procedural towns and from the ramp script for the Interstate, and
+// neither rule describes a road someone drew, so the manifest carries the
+// polyline itself.
+export function routeToManifest(route) {
+  const points = route.points;
+  return {
+    ids: route.ids,
+    points: packSurface(points),
+    // Arc length travels with the polyline. Recomputing it from packed points
+    // accumulates the rounding of every chord, which over the Interstate's
+    // 1,320 samples moved the far end of the road by more than a centimetre.
+    // Stop lines and section boundaries are stored the same way, in
+    // centimetres: snapping them to the nearest sample instead put an
+    // Interstate stop line nine centimetres off, because the ramp script does
+    // not place them on a sample.
+    stations: points.map((p) => Math.round(p.s * CM)),
+    crossings: (route.crossings ?? []).map((c) => ({
+      nodeId: c.nodeId,
+      x: c.x,
+      z: c.z,
+      approach: c.approach,
+      exit: c.exit,
+      stopS: Math.round(c.stopS * CM),
+    })),
+    ...(route.sections
+      ? {
+          sections: route.sections.map((s) => ({
+            kind: s.kind,
+            name: s.name,
+            startS: Math.round(s.startS * CM),
+            endS: Math.round(s.endS * CM),
+            speedLimit: s.speedLimit,
+            ...(s.laneHalfWidth ? { laneHalfWidth: s.laneHalfWidth } : {}),
+          })),
+        }
+      : {}),
+  };
+}
+
+export function routeFromManifest(manifest) {
+  const points = unpackSurface(manifest.points);
+  points.forEach((p, i) => (p.s = manifest.stations[i] / CM));
+  return {
+    ids: manifest.ids,
+    points,
+    length: points.at(-1).s,
+    crossings: manifest.crossings.map((c) => ({
+      nodeId: c.nodeId,
+      x: c.x,
+      z: c.z,
+      approach: c.approach,
+      exit: c.exit,
+      stopS: c.stopS / CM,
+    })),
+    ...(manifest.sections
+      ? {
+          sections: manifest.sections.map((v) => ({
+            kind: v.kind,
+            name: v.name,
+            startS: v.startS / CM,
+            endS: v.endS / CM,
+            speedLimit: v.speedLimit,
+            ...(v.laneHalfWidth ? { laneHalfWidth: v.laneHalfWidth } : {}),
+          })),
+        }
+      : {}),
+  };
+}
+
+// A world the simulator can drive, carrying its surfaces so roadGeometry uses
+// them instead of rebuilding from generator-specific fields the manifest does
+// not describe.
+export function fromManifest(manifest) {
+  const nodes = manifest.nodes.map((n) => ({ ...n }));
+  const world = {
+    seed: manifest.id,
+    type: manifest.type,
+    theme: manifest.theme,
+    nodes,
+    byId: Object.fromEntries(nodes.map((n) => [n.id, n])),
+    edges: manifest.edges.map((e) => ({ ...e })),
+    objects: manifest.objects,
+    bounds: manifest.bounds,
+    startNode: manifest.start,
+    nextNode: manifest.next,
+    destination: manifest.destination,
+    surfaces: manifest.surfaces.map(unpackSurface),
+    route: routeFromManifest(manifest.route),
+  };
+  return world;
+}
+
 export function toManifest(world, surfaces) {
   return {
     version: STAGE_FORMAT_VERSION,
@@ -89,21 +182,7 @@ export function toManifest(world, surfaces) {
     })),
     surfaces: surfaces.map((s) => packSurface(s.points)),
     objects: world.objects,
-    route: {
-      ids: world.route.ids,
-      ...(world.route.sections
-        ? {
-            sections: world.route.sections.map((s) => ({
-              kind: s.kind,
-              name: s.name,
-              startS: s.startS,
-              endS: s.endS,
-              speedLimit: s.speedLimit,
-              ...(s.laneHalfWidth ? { laneHalfWidth: s.laneHalfWidth } : {}),
-            })),
-          }
-        : {}),
-    },
+    route: routeToManifest(world.route),
   };
 }
 
@@ -174,12 +253,24 @@ export function validateManifest(manifest) {
       say(`surface ${i}: concave corner (cross ${worst.toFixed(3)})`);
   });
 
+  const stations = manifest.route.stations ?? [];
+  if (stations.length !== manifest.route.points.length / 2)
+    say("route: one arc length per point is required");
+  for (let i = 1; i < stations.length; i++)
+    if (stations[i] < stations[i - 1])
+      say(`route: arc length goes backwards at point ${i}`);
+
   for (const s of manifest.route.sections ?? []) {
     if (!SECTION_KINDS.includes(s.kind))
       say(`route section: unknown kind ${JSON.stringify(s.kind)}`);
     if (!(s.endS > s.startS))
       say(`route section ${s.kind}: endS is not past startS`);
+    if (s.endS > stations.at(-1))
+      say(`route section ${s.kind}: endS is past the end of the polyline`);
   }
+  for (const c of manifest.route.crossings ?? [])
+    if (!(c.stopS >= 0 && c.stopS <= stations.at(-1)))
+      say(`crossing ${c.nodeId}: stop line is off the polyline`);
 
   for (let i = 1; i < manifest.route.ids.length; i++) {
     const from = byId.get(manifest.route.ids[i - 1]);

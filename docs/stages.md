@@ -43,12 +43,19 @@ input, identical world.
 
 ## Blender conventions
 
-Author roads as **curves**, not meshes. A curve keeps the centreline and width
-as parameters, which is what `makeRoute` and the surface builder both need. A
-mesh forces the converter to recover that, which is fragile.
+glTF has no curve primitive, and the Blender manual is explicit: _"curves and
+other non-mesh data are not preserved, and must be converted to meshes prior to
+export."_ Empty objects are not listed as exportable either. What survives an
+export is triangles, node transforms, and `extras`.
 
-Attach semantics as **custom properties**; the glTF exporter carries them
-through as `extras`.
+So the `.glb` is **not** how a stage's data travels. Blender writes the manifest
+itself, through a Python script that reads the curves from `bpy.data` where they
+are still curves, and the `.glb` carries only what the renderer draws. Nothing
+has to be recovered from triangles.
+
+Author roads as **curves**: a curve keeps the centreline and width as
+parameters, which is what the driving line and the surface builder both need.
+Attach semantics as **custom properties**, which the script reads directly.
 
 | Object         | Property          | Values                                                                           |
 | -------------- | ----------------- | -------------------------------------------------------------------------------- |
@@ -58,22 +65,28 @@ through as `extras`.
 | Road curve     | `lane_half_width` | metres; `2.25` on the interstate, `3` elsewhere                                  |
 | Road curve     | `one_way`         | `true` for ramps                                                                 |
 | Junction empty | `control`         | `none`, `stop`, `signal`                                                         |
-| Junction empty | `offset`          | signal phase offset, 0–23                                                        |
+| Junction empty | `offset`          | signal phase offset, 0-23                                                        |
 
-Export as glTF 2.0 binary (`.glb`) with **Export Custom Properties** enabled and
-Draco compression on — the decoder already ships in `public/draco/`.
+Export the visual mesh as glTF 2.0 binary (`.glb`) with Draco compression on;
+the decoder already ships in `public/draco/`. Custom properties do not need to
+be included in that export, since the manifest carries them.
 
-Units are metres, +x east, +z south, heading 0 north. Blender's default axes
-differ; export with Y up so the converter's mapping holds.
+Units are metres, +x east, +z south, heading 0 north. Blender exports +Y up, and
+the script maps its axes when it writes the manifest.
 
-## What the converter does
+## What the exporter does
 
-`scripts/build-stage.mjs` reads the `.glb`, pulls the curves and their `extras`,
-and writes the manifest. It is the only place that turns authored geometry into
-the planner's convex surfaces, so it is also where convexity is guaranteed
-rather than hoped for: roads become quad strips along the curve, junctions
-become their own patches, and the result goes through `validateManifest` before
-it is written.
+The Blender script turns each road curve into a strip of quadrilaterals along
+its centreline and each junction into its own patch. Building the surface this
+way is what makes it convex by construction rather than by luck, which is the
+one property `roadOccupancy` cannot check for itself.
 
-A stage that fails validation is not written. The error names the surface index
-or node id, so it can be found in the `.blend` file.
+It runs `validateManifest` equivalent checks before writing, and a stage that
+fails is not written. The error names the surface index or node id, so it can be
+found back in the `.blend` file.
+
+Whatever writes a manifest, run the validator on the result:
+
+```sh
+npm run validate:stage -- src/stages/<id>.json
+```

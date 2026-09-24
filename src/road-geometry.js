@@ -54,6 +54,14 @@ export function footprint(car, padding = 0) {
 
 export function roadGeometry(world) {
   if (cache.has(world)) return cache.get(world);
+  // An authored stage ships its drivable surface already decomposed into convex
+  // pieces, checked at build time. Rebuilding it here would mean re-deriving
+  // asphalt from grid and ramp rules that describe the procedural worlds only.
+  if (world.surfaces) {
+    const authored = world.surfaces.map((points) => polygon([...points]));
+    cache.set(world, authored);
+    return authored;
+  }
   const surfaces = [];
   if (world.type === "highway") {
     // Match the rendered ribbon, including the non-drivable 2.1 m median.
